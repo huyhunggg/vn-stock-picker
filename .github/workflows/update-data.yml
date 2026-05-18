@@ -25,6 +25,9 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Update data.json
+        env:
+          SSI_CONSUMER_ID: ${{ secrets.SSI_CONSUMER_ID }}
+          SSI_CONSUMER_SECRET: ${{ secrets.SSI_CONSUMER_SECRET }}
         run: python update_data.py
 
       - name: Commit updated data
