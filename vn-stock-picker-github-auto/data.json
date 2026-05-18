@@ -1,0 +1,105 @@
+{
+  "meta": {
+    "updated_at": "sample-data",
+    "source": "sample fallback",
+    "note": "Chạy update_data.py hoặc GitHub Actions để cập nhật dữ liệu thật."
+  },
+  "stocks": [
+    {
+      "ticker": "HPG",
+      "name": "Tập đoàn Hòa Phát",
+      "sector": "Thép / Công nghiệp",
+      "score": 88,
+      "action": "MUA TỪNG PHẦN",
+      "risk": "Trung bình",
+      "close": 29500,
+      "rsi14": 61,
+      "ret20": 8.4,
+      "volume_status": "Cao",
+      "ma20": 28600,
+      "ma50": 27400,
+      "ma200": 25600,
+      "macd": 0.8,
+      "macd_signal": 0.5,
+      "reason": "Xu hướng phục hồi tốt, hưởng lợi chu kỳ thép và kỳ vọng công suất mới. Phù hợp mua từng phần khi giá điều chỉnh về nền hỗ trợ.",
+      "buyZone": "Canh mua quanh nền tích lũy hoặc khi retest MA20 thành công.",
+      "stopLoss": "-7% đến -10%",
+      "takeProfit": "+15% đến +25%",
+      "allocation": "20% - 25%",
+      "catalysts": [
+        "Chu kỳ thép",
+        "Thanh khoản tốt",
+        "Dòng tiền lớn"
+      ],
+      "cautions": [
+        "Biến động giá thép",
+        "Không mua đuổi",
+        "Nhạy với thị trường chung"
+      ]
+    },
+    {
+      "ticker": "MWG",
+      "name": "Thế Giới Di Động",
+      "sector": "Bán lẻ",
+      "score": 84,
+      "action": "MUA KHI TÍCH LŨY",
+      "risk": "Trung bình",
+      "close": 68200,
+      "rsi14": 58,
+      "ret20": 6.1,
+      "volume_status": "Tốt",
+      "ma20": 66100,
+      "ma50": 63700,
+      "ma200": 58800,
+      "macd": 1.2,
+      "macd_signal": 0.9,
+      "reason": "Lợi nhuận cải thiện nhờ tái cấu trúc, BHX và DMX có dư địa đóng góp. Nên mua khi tích lũy thay vì mua đuổi.",
+      "buyZone": "Mua quanh nền tích lũy sau nhịp tăng hoặc khi kiểm định hỗ trợ.",
+      "stopLoss": "-7% đến -8%",
+      "takeProfit": "+15% đến +22%",
+      "allocation": "15% - 20%",
+      "catalysts": [
+        "BHX cải thiện",
+        "Biên lợi nhuận",
+        "Tiêu dùng phục hồi"
+      ],
+      "cautions": [
+        "Định giá phản ánh kỳ vọng",
+        "Sức mua tiêu dùng",
+        "Cạnh tranh bán lẻ"
+      ]
+    },
+    {
+      "ticker": "FPT",
+      "name": "FPT Corp",
+      "sector": "Công nghệ",
+      "score": 79,
+      "action": "CANH MUA GIẢM",
+      "risk": "Thấp - trung bình",
+      "close": 119000,
+      "rsi14": 55,
+      "ret20": 3.5,
+      "volume_status": "Ổn định",
+      "ma20": 117000,
+      "ma50": 113000,
+      "ma200": 101000,
+      "macd": 0.7,
+      "macd_signal": 0.6,
+      "reason": "Doanh nghiệp chất lượng cao, hưởng lợi chuyển đổi số và AI. Phù hợp làm mã lõi nhưng cần kỷ luật giá mua.",
+      "buyZone": "Gom khi chiết khấu về hỗ trợ trung hạn, tránh mua đuổi.",
+      "stopLoss": "-7%",
+      "takeProfit": "+12% đến +20%",
+      "allocation": "15% - 20%",
+      "catalysts": [
+        "AI",
+        "Xuất khẩu phần mềm",
+        "Dòng tiền ngoại"
+      ],
+      "cautions": [
+        "Định giá premium",
+        "Rủi ro tỷ giá",
+        "Tốc độ tăng có thể chậm lại"
+      ]
+    }
+  ]
+}
