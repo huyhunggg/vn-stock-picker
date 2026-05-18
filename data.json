@@ -1,75 +1,36 @@
-{
-  "meta": {
-    "updated_at": "2026-05-18 14:25:41 VN",
-    "source": "fallback sample",
-    "note": "Vnstock/API lỗi nên dùng dữ liệu mẫu để web không bị trống."
-  },
-  "stocks": [
-    {
-      "ticker": "HPG",
-      "name": "Tập đoàn Hòa Phát",
-      "sector": "Thép / Công nghiệp",
-      "score": 88,
-      "action": "MUA TỪNG PHẦN",
-      "risk": "Trung bình",
-      "close": 29500,
-      "rsi14": 61,
-      "ret20": 8.4,
-      "ret60": 15.2,
-      "volume_status": "Cao",
-      "ma20": 28600,
-      "ma50": 27400,
-      "ma200": 25600,
-      "macd": 0.8,
-      "macd_signal": 0.5,
-      "reason": "Dữ liệu mẫu: xu hướng phục hồi tốt, thanh khoản tích cực.",
-      "buyZone": "Canh mua quanh nền tích lũy hoặc khi retest MA20.",
-      "stopLoss": "-7% đến -10%",
-      "takeProfit": "+15% đến +25%",
-      "allocation": "20% - 25%",
-      "catalysts": [
-        "Chu kỳ thép",
-        "Thanh khoản",
-        "Dòng tiền lớn"
-      ],
-      "cautions": [
-        "Không mua đuổi",
-        "Biến động giá thép",
-        "Theo dõi thị trường chung"
-      ]
-    },
-    {
-      "ticker": "MWG",
-      "name": "Thế Giới Di Động",
-      "sector": "Bán lẻ",
-      "score": 84,
-      "action": "MUA KHI TÍCH LŨY",
-      "risk": "Trung bình",
-      "close": 68200,
-      "rsi14": 58,
-      "ret20": 6.1,
-      "ret60": 12.5,
-      "volume_status": "Tốt",
-      "ma20": 66100,
-      "ma50": 63700,
-      "ma200": 58800,
-      "macd": 1.2,
-      "macd_signal": 0.9,
-      "reason": "Dữ liệu mẫu: lợi nhuận cải thiện, phù hợp mua khi tích lũy.",
-      "buyZone": "Mua quanh nền tích lũy sau nhịp tăng.",
-      "stopLoss": "-7% đến -8%",
-      "takeProfit": "+15% đến +22%",
-      "allocation": "15% - 20%",
-      "catalysts": [
-        "BHX cải thiện",
-        "Biên lợi nhuận",
-        "Tiêu dùng phục hồi"
-      ],
-      "cautions": [
-        "Định giá phản ánh kỳ vọng",
-        "Sức mua tiêu dùng",
-        "Không mua đuổi"
-      ]
-    }
-  ]
-}
+name: Update stock data
+
+on:
+  schedule:
+    - cron: "30 1 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Update data.json
+        run: python update_data.py
+
+      - name: Commit updated data
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add data.json
+          git commit -m "Update stock data" || echo "No changes to commit"
+          git push
