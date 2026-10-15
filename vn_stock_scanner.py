@@ -590,4 +590,90 @@ def process_single_symbol(symbol: str, vnindex_ret_20d: float, mcap_bil: float) 
     df = fetch_historical_data(symbol, days=260, session=session)
     if df.empty:
         return False, None
-    res = evaluate_stock(symbol, df, vnindex_ret_20d, mcap_
+    res = evaluate_stock(symbol, df, vnindex_ret_20d, mcap_bil=mcap_bil)
+    return True, res
+
+
+def run_scanner():
+    start_time = time.time()
+    logger.info("Bắt đầu chạy Hệ thống Quét Toàn Thị Trường (HOSE + HNX + UPCOM)...")
+
+    df_vni = fetch_historical_data("VNINDEX", days=120)
+    if not df_vni.empty and len(df_vni) >= 21:
+        vni_last = df_vni.iloc[-1]
+        vni_prev = df_vni.iloc[-2]
+        vni_20d_ago = df_vni.iloc[-21]
+        vnindex_ret_20d = float(((vni_last["close"] - vni_20d_ago["close"]) / vni_20d_ago["close"]) * 100.0)
+        vnindex_info = {
+            "close": float(vni_last["close"]) * (1000.0 if vni_last["close"] < 5.0 else 1.0),
+            "change_pct": float(((vni_last["close"] - vni_prev["close"]) / vni_prev["close"]) * 100.0),
+            "ret_20d": vnindex_ret_20d,
+        }
+    else:
+        vnindex_ret_20d = 0.0
+        vnindex_info = {"close": 0.0, "change_pct": 0.0, "ret_20d": 0.0}
+
+    symbols = get_stock_universe()
+    mcap_map = get_market_cap_map()
+    total_universe = len(symbols)
+    logger.info(f"Tổng số mã cổ phiếu 3 sàn cần quét: {total_universe} mã (Chạy {MAX_WORKERS} luồng song song)")
+
+    strong_stocks = []
+    ma100_pullback_stocks = []
+    potential_stocks = []
+    sell_warnings = []
+    scanned_count = 0
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_to_sym = {
+            executor.submit(process_single_symbol, sym, vnindex_ret_20d, mcap_map.get(sym, 0.0)): sym
+            for sym in symbols
+        }
+        for future in as_completed(future_to_sym):
+            try:
+                has_data, res = future.result()
+                if has_data:
+                    scanned_count += 1
+                if not res:
+                    continue
+
+                if res["Nhóm"] == "STRONG":
+                    strong_stocks.append(res)
+                elif res["Nhóm"] == "MA100_PULLBACK":
+                    ma100_pullback_stocks.append(res)
+                elif res["Nhóm"] == "POTENTIAL":
+                    potential_stocks.append(res)
+                elif res["Nhóm"] == "SELL_WARNING":
+                    sell_warnings.append(res)
+            except Exception:
+                pass
+
+    ma100_pullback_stocks.sort(key=lambda x: (x["Điểm"], -abs(x["Cách MA100 (%)"])), reverse=True)
+    strong_stocks.sort(key=lambda x: (x["Điểm"], x["Vol/MA20"]), reverse=True)
+    potential_stocks.sort(key=lambda x: x["Điểm"], reverse=True)
+    sell_warnings.sort(key=lambda x: x["Vol/MA20"], reverse=True)
+
+    # Xuất file CSV cho 3 bảng chính và file CSV riêng cho bảng Mẫu hình VIC
+    main_results = strong_stocks + potential_stocks + sell_warnings
+    if main_results:
+        pd.DataFrame(main_results).to_csv("scan_results_latest.csv", index=False, encoding="utf-8-sig")
+
+    if ma100_pullback_stocks:
+        pd.DataFrame(ma100_pullback_stocks).to_csv("scan_vic_ma100_latest.csv", index=False, encoding="utf-8-sig")
+
+    elapsed = time.time() - start_time
+    write_github_summary(
+        vnindex_info=vnindex_info,
+        strong_list=strong_stocks,
+        ma100_list=ma100_pullback_stocks,
+        potential_list=potential_stocks,
+        sell_list=sell_warnings,
+        total_universe=total_universe,
+        total_scanned=scanned_count,
+        elapsed_sec=elapsed,
+    )
+    logger.info(f"Hoàn tất quét {scanned_count}/{total_universe} mã trong {elapsed:.1f} giây!")
+
+
+if __name__ == "__main__":
+    run_scanner()
