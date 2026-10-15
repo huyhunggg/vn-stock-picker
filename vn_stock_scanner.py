@@ -6,11 +6,7 @@ VN-STOCK FULL MARKET QUANT SCREENER (HOSE + HNX + UPCOM ~ 1600+ MÃ)
 - Tự động lấy danh sách toàn bộ cổ phiếu 3 sàn không phụ thuộc API Key
 - Hiển thị đầy đủ +/- điểm và +/- % cho cả VN-INDEX và từng mã cổ phiếu
 - Tích hợp ngầm 3 phễu lọc (Early Signal, Confirmation, Accumulation Hunter)
-  để xuất ra đúng 4 bảng khuyến nghị hành động:
-  1. 🚀 Top Mã Mạnh (Bùng nổ dòng tiền - Mua Breakout)
-  2. 💎 Top Mã Tiềm Năng (Siết nền cạn cung - Mua Gom)
-  3. ⚠️ Cảnh Báo Chốt Lời / Gãy Nền MA20
-  4. 🎯 Bảng Riêng: Bắt đáy MA100 (Mẫu hình VIC)
+- Tích hợp hàm bắn báo cáo tự động về Telegram Bot (tùy chọn)
 """
 
 import os
@@ -39,10 +35,10 @@ _thread_local = threading.local()
 SCAN_MODE = os.getenv("SCAN_MODE", "ALL")
 DATA_SOURCE = os.getenv("VNSTOCK_SOURCE", "VCI")
 
-MIN_VOL_MA20 = int(os.getenv("MIN_VOL_MA20", "100000"))          # KLTB 20 phiên > 100.000 cp
-MIN_TRADING_VAL_BILLION = float(os.getenv("MIN_VAL_BIL", "2.0")) # Hoặc GTGD >= 2 tỷ VNĐ/phiên
-MIN_PRICE_VND = float(os.getenv("MIN_PRICE_VND", "5.0"))         # Thị giá >= 5,000 VNĐ
-MIN_MARKET_CAP_BIL = float(os.getenv("MIN_MCAP_BIL", "1000.0"))  # Vốn hóa > 1.000 tỷ VNĐ
+MIN_VOL_MA20 = int(os.getenv("MIN_VOL_MA20", "100000"))
+MIN_TRADING_VAL_BILLION = float(os.getenv("MIN_VAL_BIL", "2.0"))
+MIN_PRICE_VND = float(os.getenv("MIN_PRICE_VND", "5.0"))
+MIN_MARKET_CAP_BIL = float(os.getenv("MIN_MCAP_BIL", "1000.0"))
 
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", "16"))
 MAX_DISPLAY_ROWS = int(os.getenv("MAX_DISPLAY_ROWS", "40"))
@@ -55,12 +51,10 @@ def get_thread_session() -> requests.Session:
 
 
 # ==============================================================================
-# 2. LẤY DANH SÁCH TOÀN BỘ MÃ CỔ PHIẾU 3 SÀN (HOSE, HNX, UPCOM) & VỐN HÓA
+# 2. LẤY DANH SÁCH TOÀN BỘ MÃ CỔ PHIẾU 3 SÀN & VỐN HÓA
 # ==============================================================================
 def get_stock_universe() -> list[str]:
     symbols = set()
-
-    # Nguồn 1: API Danh mục toàn thị trường của VNDIRECT Finfo
     try:
         url = (
             "https://finfo-api.vndirect.com.vn/v4/stocks"
@@ -78,7 +72,6 @@ def get_stock_universe() -> list[str]:
     except Exception as e:
         logger.debug(f"Lỗi nguồn VNDIRECT Finfo: {e}")
 
-    # Nguồn 2: API Danh sách mã của Entrade / DNSE
     if len(symbols) < 500:
         try:
             url = "https://services.entrade.com.vn/chart-api/symbols?type=stock"
@@ -93,7 +86,6 @@ def get_stock_universe() -> list[str]:
         except Exception as e:
             logger.debug(f"Lỗi nguồn Entrade symbols: {e}")
 
-    # Nguồn 3: Thư viện vnstock Listing
     if len(symbols) < 500:
         try:
             from vnstock import Listing
@@ -112,7 +104,6 @@ def get_stock_universe() -> list[str]:
 
 
 def get_market_cap_map() -> dict[str, float]:
-    """Lấy Vốn hóa thị trường (Tỷ VNĐ) từ VNDIRECT Finfo Ratios (itemCode: 51003)."""
     mcap_map: dict[str, float] = {}
     min_date = (datetime.now(VN_TZ) - timedelta(days=45)).strftime("%Y-%m-%d")
     try:
@@ -156,7 +147,6 @@ def fetch_historical_data(symbol: str, days: int = 260, session: requests.Sessio
 
     req_client = session if session is not None else requests
 
-    # Cách 1: API Chart Entrade/DNSE
     try:
         idx_type = "index" if symbol.upper() in ["VNINDEX", "VN30", "HNXINDEX"] else "stock"
         url = (
@@ -179,7 +169,6 @@ def fetch_historical_data(symbol: str, days: int = 260, session: requests.Sessio
     except Exception:
         pass
 
-    # Cách 2: API Dchart của VNDIRECT
     try:
         url = (
             f"https://dchart-api.vndirect.com.vn/dchart/history"
@@ -218,7 +207,6 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["Vol_MA20"] = df["volume"].rolling(window=20).mean()
     df["R_Vol"] = df["volume"] / df["Vol_MA20"].replace(0, np.nan)
 
-    # Biến động 1 tuần (5 phiên), 1 tháng (20 phiên), 3 tháng (60 phiên)
     df["Return_5d"] = df["close"].pct_change(periods=5) * 100.0
     df["Return_20d"] = df["close"].pct_change(periods=20) * 100.0
     df["Return_60d"] = df["close"].pct_change(periods=60) * 100.0
@@ -228,7 +216,6 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     low_5d = df["low"].rolling(window=5).min()
     df["Range_5d_Pct"] = ((high_5d - low_5d) / low_5d.replace(0, np.nan)) * 100.0
 
-    # Ước lượng tỷ lệ Mua chủ động (Buy Active %)
     candle_spread = (df["high"] - df["low"]).replace(0, np.nan)
     close_loc = ((df["close"] - df["low"]) / candle_spread).fillna(0.5)
     body_bias = np.where(df["close"] >= df["open"], 0.06, -0.04)
@@ -239,7 +226,6 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     ) * 100.0
     df["Buy_Active_Pct"] = (active_buy_1d * 100.0 * 0.60) + (active_buy_5d.fillna(50.0) * 0.40)
 
-    # RSI(14) chuẩn Wilder
     delta = df["close"].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -248,20 +234,17 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     rs = avg_gain / avg_loss.replace(0, np.nan)
     df["RSI14"] = 100.0 - (100.0 / (1.0 + rs))
 
-    # MACD (12, 26, 9)
     ema12 = df["close"].ewm(span=12, adjust=False).mean()
     ema26 = df["close"].ewm(span=26, adjust=False).mean()
     df["MACD"] = ema12 - ema26
     df["MACD_Signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
     df["MACD_Hist"] = df["MACD"] - df["MACD_Signal"]
 
-    # Bollinger Bands (20, 2)
     std20 = df["close"].rolling(window=20).std()
     df["BB_Upper"] = df["MA20"] + 2.0 * std20
     df["BB_Lower"] = df["MA20"] - 2.0 * std20
     df["BB_Width"] = ((df["BB_Upper"] - df["BB_Lower"]) / df["MA20"].replace(0, np.nan)) * 100.0
 
-    # ATR(14)
     high_low = df["high"] - df["low"]
     high_close = (df["high"] - df["close"].shift(1)).abs()
     low_close = (df["low"] - df["close"].shift(1)).abs()
@@ -288,11 +271,9 @@ def evaluate_stock(
     if np.isnan(last["close"]) or np.isnan(last["Vol_MA20"]) or np.isnan(last["MA100"]):
         return None
 
-    # Giá trị giao dịch trung bình 20 phiên (tỷ VNĐ) & Vốn hóa ước tính
     avg_trading_val_bil = float((last["close"] * last["Vol_MA20"]) / 1_000_000.0)
     market_cap_bil = float(mcap_bil) if mcap_bil > 0 else round(avg_trading_val_bil * 120.0, 1)
 
-    # Tầng 1: Lọc thanh khoản cơ bản
     if last["close"] < MIN_PRICE_VND:
         return None
     if last["Vol_MA20"] < MIN_VOL_MA20 and avg_trading_val_bil < MIN_TRADING_VAL_BILLION:
@@ -313,14 +294,12 @@ def evaluate_stock(
     candle_range = max(float(last["high"] - last["low"]), 0.001)
     close_pos = float((last["close"] - last["low"]) / candle_range)
 
-    # Tính cả mức tăng/giảm điểm (giá) và % tăng/giảm trong phiên của cổ phiếu
     daily_change_pts = float(last["close"] - prev["close"])
     daily_change_pct = float((daily_change_pts / prev["close"]) * 100.0)
     session_change_str = f"{daily_change_pts:+.2f} ({daily_change_pct:+.2f}%)"
 
     dist_to_ma100_pct = float(((last["close"] - last["MA100"]) / last["MA100"]) * 100.0)
 
-    # Kiểm tra 3 bộ tiêu chí định lượng (Early Signal, Confirmation, Accumulation Hunter)
     has_mcap_1000b = market_cap_bil >= MIN_MARKET_CAP_BIL
     pass_early_signal = (
         has_mcap_1000b
@@ -347,9 +326,6 @@ def evaluate_stock(
         and buy_active_pct > 50.0
     )
 
-    # ==========================================================================
-    # 1. MẪU HÌNH VIC: BẮT ĐÁY NHỊP CHỈNH VỀ MA100 TRONG UPTREND LỚN
-    # ==========================================================================
     macro_uptrend = ma100_slope_up and (last["MA50"] >= last["MA100"] * 0.97)
     near_ma100 = (-4.0 <= dist_to_ma100_pct <= 5.0) or (
         df["low"].iloc[-3:].min() <= last["MA100"] * 1.025 and last["close"] >= last["MA100"] * 0.965
@@ -371,9 +347,6 @@ def evaluate_stock(
         and price_stabilizing
     )
 
-    # ==========================================================================
-    # 2. MÃ TIỀM NĂNG: TÍCH LŨY SIẾT NỀN CẠN CUNG - MUA GOM
-    # ==========================================================================
     is_potential_acc = (
         last["close"] > last["MA50"]
         and ma50_slope_up
@@ -394,9 +367,6 @@ def evaluate_stock(
         and (pass_early_signal or (rs_diff >= -1.0 and buy_active_pct > 51.0 and (-3.0 < ret_1w < 8.0)))
     )
 
-    # ==========================================================================
-    # 3. MÃ MẠNH: BÙNG NỔ DÒNG TIỀN - MUA BREAKOUT
-    # ==========================================================================
     is_strong_breakout = (
         last["close"] > last["MA20"]
         and last["close"] > last["MA50"]
@@ -408,9 +378,6 @@ def evaluate_stock(
         and (pass_confirmation or pass_early_signal or (rs_diff >= 1.0 and buy_active_pct > 51.0))
     )
 
-    # ==========================================================================
-    # 4. CẢNH BÁO BÁN / CHỐT LỜI
-    # ==========================================================================
     dist_from_ma20_pct = ((last["close"] - last["MA20"]) / last["MA20"]) * 100.0
     is_sell_signal = (
         (last["close"] < last["MA20"] and prev["close"] >= prev["MA20"] and last["R_Vol"] >= 1.30)
@@ -435,7 +402,6 @@ def evaluate_stock(
     else:
         return None
 
-    # --- CHẤM ĐIỂM ĐỊNH LƯỢNG ---
     if category == "MA100_PULLBACK":
         proximity_pts = float(np.clip(35.0 - abs(dist_to_ma100_pct) * 5.5, 10.0, 35.0))
         trend_pts = 30.0 if (last["MA50"] > last["MA100"] and ma100_slope_up) else 20.0
@@ -480,7 +446,6 @@ def evaluate_stock(
     target_price = round(float(last["close"]) + 3.0 * atr_val, 2)
     tp_pct = round(((target_price - float(last["close"])) / float(last["close"])) * 100.0, 1)
 
-    # Bảng riêng cho Mẫu hình VIC (Bắt đáy MA100)
     if category == "MA100_PULLBACK":
         return {
             "Mã": symbol,
@@ -498,7 +463,6 @@ def evaluate_stock(
             "Mục tiêu (3ATR)": f"{target_price:.2f} (+{tp_pct:.1f}%)",
         }
 
-    # Bảng chuẩn cho Top Mã Mạnh, Top Mã Tiềm Năng & Cảnh Báo Chốt Lời
     return {
         "Mã": symbol,
         "Nhóm": category,
@@ -516,7 +480,79 @@ def evaluate_stock(
 
 
 # ==============================================================================
-# 5. HIỂN THỊ BẢNG KẾT QUẢ TRÊN GITHUB ACTIONS SUMMARY
+# 5. HÀM GỬI BÁO CÁO TỰ ĐỘNG VỀ TELEGRAM BOT
+# ==============================================================================
+def send_telegram_alert(
+    vnindex_info: dict,
+    strong_list: list[dict],
+    ma100_list: list[dict],
+    potential_list: list[dict],
+):
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+
+    if not bot_token or not chat_id:
+        return
+
+    now_str = datetime.now(VN_TZ).strftime("%H:%M - %d/%m/%Y")
+    vni_close = vnindex_info.get("close", 0.0)
+    vni_pts = vnindex_info.get("change_pts", 0.0)
+    vni_chg = vnindex_info.get("change_pct", 0.0)
+    vni_icon = "🟢" if vni_pts >= 0 else "🔴"
+
+    msg_lines = [
+        f"🚨 **BÁO CÁO TÍN HIỆU ĐỊNH LƯỢNG ({now_str})**",
+        f"📊 **VN-INDEX:** `{vni_close:,.2f}` ({vni_icon} `{vni_pts:+.2f}` | `{vni_chg:+.2f}%`)",
+        "",
+    ]
+
+    msg_lines.append(f"🚀 **Top Mã Breakout ({len(strong_list)} mã):**")
+    if strong_list:
+        for item in strong_list[:5]:
+            msg_lines.append(
+                f"• `{item['Mã']}`: Giá `{item['Giá']}` ({item['% Phiên']}) | "
+                f"Vol/MA20: `{item['Vol/MA20']}` | TP: `{item['Mục tiêu (3ATR)']}`"
+            )
+    else:
+        msg_lines.append("_Không có mã đạt chuẩn._")
+
+    msg_lines.append("")
+    msg_lines.append(f"🎯 **Bắt đáy MA100 - VIC ({len(ma100_list)} mã):**")
+    if ma100_list:
+        for item in ma100_list[:5]:
+            msg_lines.append(
+                f"• `{item['Mã']}`: Giá `{item['Giá']}` | Cách MA100: `{item['Cách MA100 (%)']}%`"
+            )
+    else:
+        msg_lines.append("_Chưa có mã chạm MA100._")
+
+    msg_lines.append("")
+    msg_lines.append(f"💎 **Top Tích Lũy Cạn Cung ({len(potential_list)} mã):**")
+    if potential_list:
+        for item in potential_list[:5]:
+            msg_lines.append(
+                f"• `{item['Mã']}`: Giá `{item['Giá']}` ({item['% Phiên']}) | "
+                f"BB Width: `{item['Độ siết BB (%)']}%`"
+            )
+    else:
+        msg_lines.append("_Không có mã siết nền._")
+
+    final_message = "\n".join(msg_lines)
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": final_message, "parse_mode": "Markdown"}
+
+    try:
+        resp = requests.post(url, json=payload, timeout=10)
+        if resp.status_code == 200:
+            logger.info("Đã gửi cảnh báo tín hiệu thành công về Telegram Bot!")
+        else:
+            logger.warning(f"Lỗi gửi Telegram: {resp.text}")
+    except Exception as e:
+        logger.error(f"Không thể kết nối tới Telegram API: {e}")
+
+
+# ==============================================================================
+# 6. HIỂN THỊ BẢNG KẾT QUẢ TRÊN GITHUB ACTIONS SUMMARY
 # ==============================================================================
 def write_github_summary(
     vnindex_info: dict,
@@ -585,7 +621,7 @@ def write_github_summary(
 
 
 # ==============================================================================
-# 6. HÀM CHẠY CHÍNH (QUÉT ĐA LUỒNG 16 WORKERS TOÀN THỊ TRƯỜNG)
+# 7. HÀM CHẠY CHÍNH (QUÉT ĐA LUỒNG 16 WORKERS TOÀN THỊ TRƯỜNG)
 # ==============================================================================
 def process_single_symbol(symbol: str, vnindex_ret_20d: float, mcap_bil: float) -> tuple[bool, dict | None]:
     session = get_thread_session()
@@ -600,10 +636,9 @@ def run_scanner():
     start_time = time.time()
     logger.info("Bắt đầu chạy Hệ thống Quét Toàn Thị Trường (HOSE + HNX + UPCOM)...")
 
-    # Lấy trực tiếp thông số VN-INDEX realtime từ API Market Index chuẩn xác
     vnindex_ret_20d = 0.0
     vnindex_info = {"close": 0.0, "change_pts": 0.0, "change_pct": 0.0, "ret_20d": 0.0}
-    
+
     try:
         url_vni = "https://services.entrade.com.vn/chart-api/v2/ohlcs/index?from=0&to=9999999999&symbol=VNINDEX&resolution=1D"
         resp_vni = requests.get(url_vni, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
@@ -615,10 +650,10 @@ def run_scanner():
                 vni_prev_close = float(closes[-2])
                 vni_change_pts = vni_close - vni_prev_close
                 vni_change_pct = float((vni_change_pts / vni_prev_close) * 100.0)
-                
+
                 vni_20d_ago = float(closes[-21])
                 vnindex_ret_20d = float(((vni_close - vni_20d_ago) / vni_20d_ago) * 100.0)
-                
+
                 vnindex_info = {
                     "close": vni_close,
                     "change_pts": vni_change_pts,
@@ -628,7 +663,6 @@ def run_scanner():
     except Exception:
         pass
 
-    # Fallback dự phòng lấy qua hàm lịch sử cũ nếu API Market Index lỗi
     if vnindex_info["close"] == 0.0:
         df_vni = fetch_historical_data("VNINDEX", days=120)
         if not df_vni.empty and len(df_vni) >= 21:
@@ -705,90 +739,17 @@ def run_scanner():
         total_scanned=scanned_count,
         elapsed_sec=elapsed,
     )
+
+    # Đẩy thông báo tự động về Telegram (nếu đã cấu hình Secret)
+    send_telegram_alert(
+        vnindex_info=vnindex_info,
+        strong_list=strong_stocks,
+        ma100_list=ma100_pullback_stocks,
+        potential_list=potential_stocks,
+    )
+
     logger.info(f"Hoàn tất quét {scanned_count}/{total_universe} mã trong {elapsed:.1f} giây!")
 
 
 if __name__ == "__main__":
     run_scanner()
-# ==============================================================================
-# HÀM GỬI BÁO CÁO TỰ ĐỘNG VỀ TELEGRAM BOT
-# ==============================================================================
-def send_telegram_alert(
-    vnindex_info: dict,
-    strong_list: list[dict],
-    ma100_list: list[dict],
-    potential_list: list[dict],
-):
-    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
-
-    if not bot_token or not chat_id:
-        logger.info("Chưa cấu hình Telegram Bot Token hoặc Chat ID, bỏ qua bước bắn tin nhắn.")
-        return
-
-    now_str = datetime.now(VN_TZ).strftime("%H:%M - %d/%m/%Y")
-    vni_close = vnindex_info.get("close", 0.0)
-    vni_pts = vnindex_info.get("change_pts", 0.0)
-    vni_chg = vnindex_info.get("change_pct", 0.0)
-    vni_icon = "🟢" if vni_pts >= 0 else "🔴"
-
-    # Tạo nội dung tin nhắn ngắn gọn, sắc nét chuẩn định lượng
-    msg_lines = [
-        f"🚨 **BÁO CÁO TÍN HIỆU ĐỊNH LƯỢNG ({now_str})**",
-        f"📊 **VN-INDEX:** `{vni_close:,.2f}` ({vni_icon} `{vni_pts:+.2f}` | `{vni_chg:+.2f}%`)",
-        "",
-    ]
-
-    # Thêm top mã Breakout (Nhóm mạnh)
-    msg_lines.append(f"🚀 **Top Mã Breakout ({len(strong_list)} mã):**")
-    if strong_list:
-        for item in strong_list[:5]:  # Lấy tối đa top 5 mã điểm cao nhất
-            msg_lines.append(
-                f"• `{item['Mã']}`: Giá `{item['Giá']}` ({item['% Phiên']}) | "
-                f"Vol/MA20: `{item['Vol/MA20']}` | TP: `{item['Mục tiêu (3ATR)']}`"
-            )
-    else:
-        msg_lines.append("_Không có mã đạt chuẩn._")
-
-    # Thêm top mã Bắt đáy MA100 (Mẫu hình VIC)
-    msg_lines.append("")
-    msg_lines.append(f"🎯 **Bắt đáy MA100 - VIC ({len(ma100_list)} mã):**")
-    if ma100_list:
-        for item in ma100_list[:5]:
-            msg_lines.append(
-                f"• `{item['Mã']}`: Giá `{item['Giá']}` | Cách MA100: `{item['Cách MA100 (%)']}%` | "
-                f"RSI: `{item['RSI(14)']}`"
-            )
-    else:
-        msg_lines.append("_Chưa có mã chạm MA100._")
-
-    # Thêm top mã Tích lũy cạn cung
-    msg_lines.append("")
-    msg_lines.append(f"💎 **Top Tích Lũy Cạn Cung ({len(potential_list)} mã):**")
-    if potential_list:
-        for item in potential_list[:5]:
-            msg_lines.append(
-                f"• `{item['Mã']}`: Giá `{item['Giá']}` ({item['% Phiên']}) | "
-                f"BB Width: `{item['Độ siết BB (%)']}%`"
-            )
-    else:
-        msg_lines.append("_Không có mã siết nền._")
-
-    final_message = "\n".join(msg_lines)
-
-    # Gửi qua Telegram API
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": final_message,
-        "parse_mode": "Markdown",
-    }
-
-    try:
-        resp = requests.post(url, json=payload, timeout=10)
-        if resp.status_code == 200:
-            logger.info("Đã gửi cảnh báo tín hiệu thành công về Telegram Bot!")
-        else:
-            logger.warning(f"Lỗi gửi Telegram: {resp.text}")
-    except Exception as e:
-        logger.error(f"Không thể kết nối tới Telegram API: {e}")
