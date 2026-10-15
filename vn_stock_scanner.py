@@ -600,32 +600,52 @@ def run_scanner():
     start_time = time.time()
     logger.info("Bắt đầu chạy Hệ thống Quét Toàn Thị Trường (HOSE + HNX + UPCOM)...")
 
-    df_vni = fetch_historical_data("VNINDEX", days=120)
-    if not df_vni.empty and len(df_vni) >= 21:
-        now_hour = datetime.now(VN_TZ).hour
-        if now_hour < 15 and len(df_vni) >= 2:
-            vni_last = df_vni.iloc[-2]
-            vni_prev = df_vni.iloc[-3]
-        else:
+    # Lấy trực tiếp thông số VN-INDEX realtime từ API Market Index chuẩn xác
+    vnindex_ret_20d = 0.0
+    vnindex_info = {"close": 0.0, "change_pts": 0.0, "change_pct": 0.0, "ret_20d": 0.0}
+    
+    try:
+        url_vni = "https://services.entrade.com.vn/chart-api/v2/ohlcs/index?from=0&to=9999999999&symbol=VNINDEX&resolution=1D"
+        resp_vni = requests.get(url_vni, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
+        if resp_vni.status_code == 200:
+            data_vni = resp_vni.json()
+            if data_vni and "c" in data_vni and len(data_vni["c"]) >= 21:
+                closes = data_vni["c"]
+                vni_close = float(closes[-1])
+                vni_prev_close = float(closes[-2])
+                vni_change_pts = vni_close - vni_prev_close
+                vni_change_pct = float((vni_change_pts / vni_prev_close) * 100.0)
+                
+                vni_20d_ago = float(closes[-21])
+                vnindex_ret_20d = float(((vni_close - vni_20d_ago) / vni_20d_ago) * 100.0)
+                
+                vnindex_info = {
+                    "close": vni_close,
+                    "change_pts": vni_change_pts,
+                    "change_pct": vni_change_pct,
+                    "ret_20d": vnindex_ret_20d,
+                }
+    except Exception:
+        pass
+
+    # Fallback dự phòng lấy qua hàm lịch sử cũ nếu API Market Index lỗi
+    if vnindex_info["close"] == 0.0:
+        df_vni = fetch_historical_data("VNINDEX", days=120)
+        if not df_vni.empty and len(df_vni) >= 21:
             vni_last = df_vni.iloc[-1]
             vni_prev = df_vni.iloc[-2]
-
-        vni_20d_ago = df_vni.iloc[-21]
-        scale_vni = 1000.0 if vni_last["close"] < 5.0 else 1.0
-        vni_close = float(vni_last["close"]) * scale_vni
-        vni_prev_close = float(vni_prev["close"]) * scale_vni
-        vni_change_pts = vni_close - vni_prev_close
-        vni_change_pct = float(((vni_close - vni_prev_close) / vni_prev_close) * 100.0)
-        vnindex_ret_20d = float(((vni_last["close"] - vni_20d_ago["close"]) / vni_20d_ago["close"]) * 100.0)
-        vnindex_info = {
-            "close": vni_close,
-            "change_pts": vni_change_pts,
-            "change_pct": vni_change_pct,
-            "ret_20d": vnindex_ret_20d,
-        }
-    else:
-        vnindex_ret_20d = 0.0
-        vnindex_info = {"close": 0.0, "change_pts": 0.0, "change_pct": 0.0, "ret_20d": 0.0}
+            vni_20d_ago = df_vni.iloc[-21]
+            vni_close = float(vni_last["close"])
+            vni_prev_close = float(vni_prev["close"])
+            vni_change_pts = vni_close - vni_prev_close
+            vni_change_pct = float((vni_change_pts / vni_prev_close) * 100.0)
+            vnindex_ret_20d = float(((vni_close - float(vni_20d_ago["close"])) / float(vni_20d_ago["close"])) * 100.0)
+            vnindex_info = {
+                "close": vni_close,
+                "change_pts": vni_change_pts,
+                "change_pct": vni_change_pct,
+                "ret_20d": vnindex_ret_20d,
+            }
 
     symbols = get_stock_universe()
     mcap_map = get_market_cap_map()
