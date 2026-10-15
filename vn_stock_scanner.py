@@ -428,4 +428,259 @@ def evaluate_stock(
         action_label = "BAT DAY MA100 (MAU HINH VIC)"
     elif is_potential_acc or is_pocket_pivot:
         category = "POTENTIAL"
-        action_label = "GOM NEN (
+        action_label = "GOM NEN (POCKET PIVOT)" if is_pocket_pivot else "TICH LUY CAN CUNG"
+    elif is_sell_signal:
+        category = "SELL_WARNING"
+        action_label = "CAT LO / GAY MA20" if last["close"] < last["MA20"] else "CHOT LOI (QUA MUA)"
+    else:
+        return None
+
+    # --- CHẤM ĐIỂM ĐỊNH LƯỢNG ---
+    if category == "MA100_PULLBACK":
+        proximity_pts = float(np.clip(35.0 - abs(dist_to_ma100_pct) * 5.5, 10.0, 35.0))
+        trend_pts = 30.0 if (last["MA50"] > last["MA100"] and ma100_slope_up) else 20.0
+        rebound_pts = (18.0 if last["MACD_Hist"] > prev["MACD_Hist"] else 10.0) + float(
+            np.clip(close_pos * 17.0, 5.0, 17.0)
+        )
+        total_score = round(proximity_pts + trend_pts + rebound_pts, 1)
+    else:
+        score_rs = float(np.clip((rs_diff + 4.0) * 3.2, 0.0, 35.0))
+        if category == "STRONG":
+            score_vol = float(np.clip(last["R_Vol"] * 14.5 * close_pos, 0.0, 35.0))
+        elif category == "POTENTIAL":
+            tightness_bonus = max(0.0, (16.0 - float(last["BB_Width"])) * 2.2)
+            score_vol = float(np.clip(tightness_bonus + close_pos * 10.0, 0.0, 35.0))
+        else:
+            score_vol = float(np.clip(last["R_Vol"] * 12.0, 0.0, 35.0))
+
+        trend_pts = 0.0
+        if last["close"] > last["MA20"] > last["MA50"]:
+            trend_pts += 15.0
+        elif last["close"] > last["MA50"]:
+            trend_pts += 10.0
+        if not np.isnan(last["MA200"]) and last["close"] > last["MA200"]:
+            trend_pts += 5.0
+        if 52.0 <= last["RSI14"] <= 70.0 and last["MACD_Hist"] >= prev["MACD_Hist"]:
+            trend_pts += 10.0
+        elif 45.0 <= last["RSI14"] <= 74.0:
+            trend_pts += 6.0
+
+        scanner_bonus = 0.0
+        if pass_confirmation:
+            scanner_bonus = 8.0
+        elif pass_early_signal:
+            scanner_bonus = 5.0
+        elif pass_accumulation:
+            scanner_bonus = 4.0
+
+        total_score = round(min(99.0, score_rs + score_vol + trend_pts + scanner_bonus), 1)
+
+    atr_val = float(last["ATR14"]) if not np.isnan(last["ATR14"]) else float(last["close"] * 0.03)
+    stop_loss = round(float(last["close"]) - 2.0 * atr_val, 2)
+    target_price = round(float(last["close"]) + 3.0 * atr_val, 2)
+    tp_pct = round(((target_price - float(last["close"])) / float(last["close"])) * 100.0, 1)
+
+    # Bảng riêng cho Mẫu hình VIC (Bắt đáy MA100)
+    if category == "MA100_PULLBACK":
+        return {
+            "Mã": symbol,
+            "Nhóm": category,
+            "Tín hiệu": action_label,
+            "Điểm": total_score,
+            "Giá": round(float(last["close"]), 2),
+            "% Phiên": session_change_str,
+            "Vol/MA20": round(float(last["R_Vol"]), 2),
+            "MA100": round(float(last["MA100"]), 2),
+            "Cách MA100 (%)": round(dist_to_ma100_pct, 2),
+            "RSI(14)": round(float(last["RSI14"]), 1),
+            "MACD Hist": round(float(last["MACD_Hist"]), 2),
+            "Cắt lỗ (2ATR)": stop_loss,
+            "Mục tiêu (3ATR)": f"{target_price:.2f} (+{tp_pct:.1f}%)",
+        }
+
+    # Bảng chuẩn cho Top Mã Mạnh, Top Mã Tiềm Năng & Cảnh Báo Chốt Lời
+    return {
+        "Mã": symbol,
+        "Nhóm": category,
+        "Tín hiệu": action_label,
+        "Điểm": total_score,
+        "Giá": round(float(last["close"]), 2),
+        "% Phiên": session_change_str,
+        "Vol/MA20": round(float(last["R_Vol"]), 2),
+        "RS vs VNI (%)": round(rs_diff, 1),
+        "RSI(14)": round(float(last["RSI14"]), 1),
+        "Độ siết BB (%)": round(float(last["BB_Width"]), 1),
+        "Cắt lỗ (2ATR)": stop_loss,
+        "Mục tiêu (3ATR)": f"{target_price:.2f} (+{tp_pct:.1f}%)",
+    }
+
+
+# ==============================================================================
+# 5. HIỂN THỊ BẢNG KẾT QUẢ TRÊN GITHUB ACTIONS SUMMARY
+# ==============================================================================
+def write_github_summary(
+    vnindex_info: dict,
+    strong_list: list[dict],
+    ma100_list: list[dict],
+    potential_list: list[dict],
+    sell_list: list[dict],
+    total_universe: int,
+    total_scanned: int,
+    elapsed_sec: float,
+):
+    now_str = datetime.now(VN_TZ).strftime("%H:%M - %d/%m/%Y")
+    vni_close = vnindex_info.get("close", 0.0)
+    vni_pts = vnindex_info.get("change_pts", 0.0)
+    vni_chg = vnindex_info.get("change_pct", 0.0)
+    vni_ret20 = vnindex_info.get("ret_20d", 0.0)
+    vni_icon = "🟢" if vni_pts >= 0 else "🔴"
+
+    lines = [
+        f"## 📊 Báo Cáo Quét Toàn Thị Trường HOSE + HNX + UPCOM ({now_str})",
+        f"- **Tổng số mã niêm yết đã quét:** `{total_scanned} / {total_universe}` mã (Thời gian chạy: `{elapsed_sec:.1f}s`)",
+        f"- **Điều kiện lọc Thanh khoản:** Khối lượng TB 20 phiên >= `{MIN_VOL_MA20:,}` cp hoặc GTGD >= `{MIN_TRADING_VAL_BILLION}` tỷ VNĐ/phiên",
+        f"- **VN-INDEX:** `{vni_close:,.2f}` ({vni_icon} `{vni_pts:+.2f} điểm` / `{vni_chg:+.2f}%`) | **Hiệu suất 20 phiên:** `{vni_ret20:+.2f}%`",
+        "",
+        "### 🚀 1. Top Mã Mạnh (Bùng nổ dòng tiền - Mua Breakout)",
+    ]
+
+    if strong_list:
+        df_strong = pd.DataFrame(strong_list).drop(columns=["Nhóm"])
+        lines.append(df_strong.head(MAX_DISPLAY_ROWS).to_markdown(index=False))
+    else:
+        lines.append("_Chưa có mã đạt chuẩn nổ Vol & vượt nền trong phiên._")
+
+    lines.append("")
+    lines.append("### 💎 2. Top Mã Tiềm Năng (Siết nền cạn cung - Mua Gom)")
+    if potential_list:
+        df_pot = pd.DataFrame(potential_list).drop(columns=["Nhóm"])
+        lines.append(df_pot.head(MAX_DISPLAY_ROWS).to_markdown(index=False))
+    else:
+        lines.append("_Không có mã đạt tiêu chuẩn siết nền cạn cung._")
+
+    lines.append("")
+    lines.append("### ⚠️ 3. Cảnh Báo Chốt Lời / Gãy Nền MA20")
+    if sell_list:
+        df_sell = pd.DataFrame(sell_list).drop(columns=["Nhóm"])
+        lines.append(df_sell.head(25).to_markdown(index=False))
+    else:
+        lines.append("_Không có cảnh báo bán đột biến._")
+
+    lines.append("")
+    lines.append("---")
+    lines.append(f"### 🎯 4. Bảng Riêng: Nhóm Bắt Đáy MA100 - Mẫu hình VIC (Tìm thấy: {len(ma100_list)} mã)")
+    if ma100_list:
+        df_ma100 = pd.DataFrame(ma100_list).drop(columns=["Nhóm"])
+        lines.append(df_ma100.head(MAX_DISPLAY_ROWS).to_markdown(index=False))
+    else:
+        lines.append("_Chưa có mã chạm MA100 kèm tín hiệu chững đà rơi RSI/MACD._")
+
+    summary_text = chr(10).join(lines)
+    print(summary_text)
+
+    summary_path = os.getenv("GITHUB_STEP_SUMMARY")
+    if summary_path:
+        with open(summary_path, "a", encoding="utf-8") as f:
+            f.write(summary_text + chr(10))
+
+
+# ==============================================================================
+# 6. HÀM CHẠY CHÍNH (QUÉT ĐA LUỒNG 16 WORKERS TOÀN THỊ TRƯỜNG)
+# ==============================================================================
+def process_single_symbol(symbol: str, vnindex_ret_20d: float, mcap_bil: float) -> tuple[bool, dict | None]:
+    session = get_thread_session()
+    df = fetch_historical_data(symbol, days=260, session=session)
+    if df.empty:
+        return False, None
+    res = evaluate_stock(symbol, df, vnindex_ret_20d, mcap_bil=mcap_bil)
+    return True, res
+
+
+def run_scanner():
+    start_time = time.time()
+    logger.info("Bắt đầu chạy Hệ thống Quét Toàn Thị Trường (HOSE + HNX + UPCOM)...")
+
+    df_vni = fetch_historical_data("VNINDEX", days=120)
+    if not df_vni.empty and len(df_vni) >= 21:
+        vni_last = df_vni.iloc[-1]
+        vni_prev = df_vni.iloc[-2]
+        vni_20d_ago = df_vni.iloc[-21]
+        scale_vni = 1000.0 if vni_last["close"] < 5.0 else 1.0
+        vni_close = float(vni_last["close"]) * scale_vni
+        vni_prev_close = float(vni_prev["close"]) * scale_vni
+        vni_change_pts = vni_close - vni_prev_close
+        vni_change_pct = float(((vni_close - vni_prev_close) / vni_prev_close) * 100.0)
+        vnindex_ret_20d = float(((vni_last["close"] - vni_20d_ago["close"]) / vni_20d_ago["close"]) * 100.0)
+        vnindex_info = {
+            "close": vni_close,
+            "change_pts": vni_change_pts,
+            "change_pct": vni_change_pct,
+            "ret_20d": vnindex_ret_20d,
+        }
+    else:
+        vnindex_ret_20d = 0.0
+        vnindex_info = {"close": 0.0, "change_pts": 0.0, "change_pct": 0.0, "ret_20d": 0.0}
+
+    symbols = get_stock_universe()
+    mcap_map = get_market_cap_map()
+    total_universe = len(symbols)
+    logger.info(f"Tổng số mã cổ phiếu 3 sàn cần quét: {total_universe} mã (Chạy {MAX_WORKERS} luồng song song)")
+
+    strong_stocks = []
+    ma100_pullback_stocks = []
+    potential_stocks = []
+    sell_warnings = []
+    scanned_count = 0
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_to_sym = {
+            executor.submit(process_single_symbol, sym, vnindex_ret_20d, mcap_map.get(sym, 0.0)): sym
+            for sym in symbols
+        }
+        for future in as_completed(future_to_sym):
+            try:
+                has_data, res = future.result()
+                if has_data:
+                    scanned_count += 1
+                if not res:
+                    continue
+
+                if res["Nhóm"] == "STRONG":
+                    strong_stocks.append(res)
+                elif res["Nhóm"] == "MA100_PULLBACK":
+                    ma100_pullback_stocks.append(res)
+                elif res["Nhóm"] == "POTENTIAL":
+                    potential_stocks.append(res)
+                elif res["Nhóm"] == "SELL_WARNING":
+                    sell_warnings.append(res)
+            except Exception:
+                pass
+
+    ma100_pullback_stocks.sort(key=lambda x: (x["Điểm"], -abs(x["Cách MA100 (%)"])), reverse=True)
+    strong_stocks.sort(key=lambda x: (x["Điểm"], x["Vol/MA20"]), reverse=True)
+    potential_stocks.sort(key=lambda x: x["Điểm"], reverse=True)
+    sell_warnings.sort(key=lambda x: x["Vol/MA20"], reverse=True)
+
+    main_results = strong_stocks + potential_stocks + sell_warnings
+    if main_results:
+        pd.DataFrame(main_results).to_csv("scan_results_latest.csv", index=False, encoding="utf-8-sig")
+
+    if ma100_pullback_stocks:
+        pd.DataFrame(ma100_pullback_stocks).to_csv("scan_vic_ma100_latest.csv", index=False, encoding="utf-8-sig")
+
+    elapsed = time.time() - start_time
+    write_github_summary(
+        vnindex_info=vnindex_info,
+        strong_list=strong_stocks,
+        ma100_list=ma100_pullback_stocks,
+        potential_list=potential_stocks,
+        sell_list=sell_warnings,
+        total_universe=total_universe,
+        total_scanned=scanned_count,
+        elapsed_sec=elapsed,
+    )
+    logger.info(f"Hoàn tất quét {scanned_count}/{total_universe} mã trong {elapsed:.1f} giây!")
+
+
+if __name__ == "__main__":
+    run_scanner()
