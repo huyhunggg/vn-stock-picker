@@ -1,4 +1,6 @@
-vnstock>=3.2.3
+--extra-index-url https://vnstocks.com/api/packages
+--extra-index-url https://vnstocks.com/api/simple
+vnstock
 pandas>=2.0.0
 numpy>=1.24.0
 requests>=2.31.0
