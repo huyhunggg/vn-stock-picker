@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-VN-STOCK MULTI-FACTOR QUANT SCREENER (GITHUB ACTIONS EDITION)
-Quét cổ phiếu Tiềm Năng (Tích lũy cạn cung) & Cổ phiếu Mạnh (Breakout dòng tiền)
-Hiển thị bảng trực tiếp trên trang chủ GitHub Actions Summary & xuất file CSV.
+VN-STOCK FULL MARKET QUANT SCREENER (HOSE + HNX + UPCOM ~ 1600+ MÃ)
+- Quét đa luồng (Multi-threading 16 workers) toàn bộ thị trường trong ~45 giây
+- Tự động lấy danh sách toàn bộ cổ phiếu 3 sàn không phụ thuộc API Key
+- Bắt 3 nhóm:
+  1. Bắt đáy MA100 (Mẫu hình VIC: Chạm MA100 trong Uptrend lớn + RSI/MACD tạo đáy)
+  2. Cổ phiếu Mạnh (Breakout nổ Vol dẫn dắt dòng tiền)
+  3. Cổ phiếu Tiềm Năng (Tích lũy siết nền cạn cung trên MA20/MA50)
 """
 
 import os
 import time
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 import requests
 import numpy as np
@@ -24,36 +29,84 @@ logger = logging.getLogger(__name__)
 VN_TZ = timezone(timedelta(hours=7))
 
 # ==============================================================================
-# 1. CẤU HÌNH THAM SỐ BỘ LỌC
+# 1. CẤU HÌNH QUÉT TOÀN THỊ TRƯỜNG (MẶC ĐỊNH QUÉT ALL 3 SÀN)
 # ==============================================================================
-SCAN_MODE = os.getenv("SCAN_MODE", "LIQUID_UNIVERSE")
+SCAN_MODE = os.getenv("SCAN_MODE", "ALL")  # Mặc định quét toàn bộ 3 sàn
 DATA_SOURCE = os.getenv("VNSTOCK_SOURCE", "VCI")
 
-MIN_VOL_MA20 = int(os.getenv("MIN_VOL_MA20", "500000"))
-MIN_TRADING_VAL_BILLION = float(os.getenv("MIN_VAL_BIL", "10.0"))
-MIN_PRICE_VND = float(os.getenv("MIN_PRICE_VND", "10.0"))
-API_DELAY_SECONDS = float(os.getenv("API_DELAY_SECONDS", "0.25"))
+# Hạ ngưỡng thanh khoản vừa đủ để bắt trọn cả Midcap/Smallcap đang cạn cung
+MIN_VOL_MA20 = int(os.getenv("MIN_VOL_MA20", "100000"))          # Tối thiểu 100,000 cp/phiên
+MIN_TRADING_VAL_BILLION = float(os.getenv("MIN_VAL_BIL", "2.0")) # Hoặc GTGD >= 2 tỷ VNĐ/phiên
+MIN_PRICE_VND = float(os.getenv("MIN_PRICE_VND", "5.0"))         # Thị giá >= 5,000 VNĐ
 
-EXTRA_LIQUID_SYMBOLS = [
-    "MSB", "HPG", "GAS", "DGW", "VPB", "SHB", "MBB", "TCB", "ACB", "CTG",
-    "BID", "VCB", "STB", "LPB", "TPB", "VIB", "EIB", "HDB", "OCB", "NAB",
-    "SSI", "VND", "VCI", "HCM", "SHS", "MBS", "FTS", "BSI", "CTS", "VIX",
-    "ORS", "AGR", "BVS", "VDS", "TCI",
-    "HSG", "NKG", "VGS", "GDA",
-    "FPT", "MWG", "FRT", "PNJ", "MSN", "VNM", "SAB", "DBC", "PAN", "BAF", "ANV", "VHC", "IDI",
-    "DIG", "DXG", "PDR", "NVL", "KDH", "NLG", "CEO", "HDC", "HDG", "TCH", "IJC", "NTL",
-    "KBC", "IDC", "SZC", "VGC", "GVR", "PHR", "DPR", "BCM", "SIP", "NTC",
-    "PVD", "PVS", "BSR", "PLX", "OIL", "PVT", "PVC", "CNG",
-    "GMD", "HAH", "VOS", "VSC",
-    "PC1", "REE", "GEG", "NT2", "POW", "TV2",
-    "CTR", "VGI", "FOX", "ELC", "CMG",
-    "DGC", "DCM", "DPM", "CSV", "BFC", "LAS",
-    "HHV", "VCG", "LCG", "FCN", "C4G", "CTD", "HBC", "BMP", "NTP", "PTB", "VCS", "TNG", "MSH", "GIL"
-]
+# Số luồng quét song song (16 luồng giúp quét 1600 mã trong ~45 giây)
+MAX_WORKERS = int(os.getenv("MAX_WORKERS", "16"))
+MAX_DISPLAY_ROWS = int(os.getenv("MAX_DISPLAY_ROWS", "40"))
 
 
 # ==============================================================================
-# 2. KẾT NỐI DỮ LIỆU (VNSTOCK + FALLBACK TỰ ĐỘNG QUA ENTRADE/DNSE)
+# 2. LẤY DANH SÁCH TOÀN BỘ MÃ CỔ PHIẾU 3 SÀN (HOSE, HNX, UPCOM)
+# ==============================================================================
+def get_stock_universe() -> list[str]:
+    """
+    Tự động lấy toàn bộ ~1650 mã cổ phiếu trên 3 sàn HOSE, HNX, UPCOM
+    bằng nhiều nguồn dự phòng để không bao giờ bị giới hạn số mã.
+    """
+    symbols = set()
+
+    # Nguồn 1: API Danh mục toàn thị trường của VNDIRECT Finfo (Lấy toàn bộ HOSE, HNX, UPCOM)
+    try:
+        url = (
+            "https://finfo-api.vndirect.com.vn/v4/stocks"
+            "?q=type:stock,ifc~floor:HOSE,HNX,UPCOM~status:listed&size=3000"
+        )
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(url, headers=headers, timeout=15)
+        if resp.status_code == 200:
+            data = resp.json().get("data", [])
+            for item in data:
+                code = str(item.get("code", "")).strip().upper()
+                if len(code) == 3 and code.isalpha():
+                    symbols.add(code)
+            logger.info(f"Đã tải {len(symbols)} mã từ nguồn VNDIRECT Finfo API.")
+    except Exception as e:
+        logger.debug(f"Lỗi nguồn VNDIRECT Finfo: {e}")
+
+    # Nguồn 2: API Danh sách mã của Entrade / DNSE (nếu nguồn 1 thiếu)
+    if len(symbols) < 500:
+        try:
+            url = "https://services.entrade.com.vn/chart-api/symbols?type=stock"
+            resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+            if resp.status_code == 200:
+                syms = resp.json().get("symbols", [])
+                for s in syms:
+                    code = str(s).strip().upper()
+                    if len(code) == 3 and code.isalpha():
+                        symbols.add(code)
+                logger.info(f"Tổng số mã sau khi gộp nguồn Entrade: {len(symbols)} mã.")
+        except Exception as e:
+            logger.debug(f"Lỗi nguồn Entrade symbols: {e}")
+
+    # Nguồn 3: Thư viện vnstock Listing
+    if len(symbols) < 500:
+        try:
+            from vnstock import Listing
+            listing = Listing(source=DATA_SOURCE) if "source" in Listing.__init__.__code__.co_varnames else Listing()
+            df_all = listing.all_symbols()
+            if isinstance(df_all, pd.DataFrame) and "symbol" in df_all.columns:
+                for s in df_all["symbol"].dropna().unique():
+                    code = str(s).strip().upper()
+                    if len(code) == 3 and code.isalpha():
+                        symbols.add(code)
+                logger.info(f"Tổng số mã sau khi gộp nguồn Vnstock: {len(symbols)} mã.")
+        except Exception as e:
+            logger.debug(f"Lỗi nguồn Vnstock Listing: {e}")
+
+    return sorted(list(symbols))
+
+
+# ==============================================================================
+# 3. KẾT NỐI DỮ LIỆU LỊCH SỬ OHLCV TỐC ĐỘ CAO
 # ==============================================================================
 def normalize_price_scale(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
@@ -67,23 +120,22 @@ def normalize_price_scale(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def fetch_historical_data(symbol: str, days: int = 260) -> pd.DataFrame:
+def fetch_historical_data(symbol: str, days: int = 260, session: requests.Session | None = None) -> pd.DataFrame:
     end_dt = datetime.now(VN_TZ)
     start_dt = end_dt - timedelta(days=days)
-    end_date = end_dt.strftime("%Y-%m-%d")
-    start_date = start_dt.strftime("%Y-%m-%d")
+    from_ts = int(start_dt.timestamp())
+    to_ts = int(end_dt.timestamp())
 
-    # Cách 1: Thử lấy qua API Chart Entrade/DNSE (Nhanh, ổn định trên GitHub Actions, không cần API Key)
+    req_client = session if session is not None else requests
+
+    # Cách 1: API Chart Entrade/DNSE (Cực nhanh, hỗ trợ đa luồng không cần API Key)
     try:
-        from_ts = int(start_dt.timestamp())
-        to_ts = int(end_dt.timestamp())
         idx_type = "index" if symbol.upper() in ["VNINDEX", "VN30", "HNXINDEX"] else "stock"
         url = (
             f"https://services.entrade.com.vn/chart-api/v2/ohlcs/{idx_type}"
             f"?from={from_ts}&to={to_ts}&symbol={symbol}&resolution=1D"
         )
-        headers = {"User-Agent": "Mozilla/5.0"}
-        resp = requests.get(url, headers=headers, timeout=10)
+        resp = req_client.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
         if resp.status_code == 200:
             data = resp.json()
             if data and "t" in data and len(data["t"]) > 0:
@@ -99,58 +151,42 @@ def fetch_historical_data(symbol: str, days: int = 260) -> pd.DataFrame:
     except Exception:
         pass
 
-    # Cách 2: Lấy qua vnstock
+    # Cách 2: API Dchart của VNDIRECT (Fallback siêu tốc thứ 2)
     try:
-        from vnstock import Quote
-        quote = Quote(symbol=symbol, source=DATA_SOURCE)
-        df = quote.history(start=start_date, end=end_date, interval="1D")
-        if df is not None and not df.empty:
-            return normalize_price_scale(df)
-    except Exception as e:
-        logger.debug(f"Bỏ qua mã {symbol}: {e}")
+        url = (
+            f"https://dchart-api.vndirect.com.vn/dchart/history"
+            f"?resolution=D&symbol={symbol}&from={from_ts}&to={to_ts}"
+        )
+        resp = req_client.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data and data.get("s") == "ok" and len(data.get("t", [])) > 0:
+                df = pd.DataFrame({
+                    "time": pd.to_datetime(data["t"], unit="s"),
+                    "open": pd.to_numeric(data["o"], errors="coerce"),
+                    "high": pd.to_numeric(data["h"], errors="coerce"),
+                    "low": pd.to_numeric(data["l"], errors="coerce"),
+                    "close": pd.to_numeric(data["c"], errors="coerce"),
+                    "volume": pd.to_numeric(data["v"], errors="coerce"),
+                })
+                return normalize_price_scale(df)
+    except Exception:
+        pass
 
     return pd.DataFrame()
 
 
-def get_stock_universe() -> list[str]:
-    symbols = set(EXTRA_LIQUID_SYMBOLS)
-    try:
-        from vnstock import Listing
-        listing = Listing(source=DATA_SOURCE) if "source" in Listing.__init__.__code__.co_varnames else Listing()
-        if SCAN_MODE.upper() == "ALL":
-            df_all = listing.all_symbols()
-            if isinstance(df_all, pd.DataFrame) and "symbol" in df_all.columns:
-                all_syms = [
-                    str(s).strip().upper()
-                    for s in df_all["symbol"].dropna().unique()
-                    if len(str(s).strip()) == 3 and str(s).strip().isalpha()
-                ]
-                return sorted(list(set(all_syms) | symbols))
-        else:
-            for group in ["VN100", "HNX30"]:
-                try:
-                    df_grp = listing.symbols_by_group(group)
-                    if isinstance(df_grp, pd.Series):
-                        symbols.update(df_grp.dropna().astype(str).str.upper().tolist())
-                    elif isinstance(df_grp, pd.DataFrame) and "symbol" in df_grp.columns:
-                        symbols.update(df_grp["symbol"].dropna().astype(str).str.upper().tolist())
-                except Exception:
-                    pass
-    except Exception:
-        pass
-
-    return sorted(list(symbols))
-
-
 # ==============================================================================
-# 3. TÍNH TOÁN CHỈ BÁO & CHẤM ĐIỂM ĐỊNH LƯỢNG (4 TẦNG)
+# 4. TÍNH TOÁN CHỈ BÁO & BỘ LỌC 4 NHÁNH (CÓ MẪU HÌNH VIC MA100)
 # ==============================================================================
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.sort_values("time").reset_index(drop=True)
 
     df["MA20"] = df["close"].rolling(window=20).mean()
     df["MA50"] = df["close"].rolling(window=50).mean()
+    df["MA100"] = df["close"].rolling(window=100).mean()
     df["MA200"] = df["close"].rolling(window=200).mean()
+
     df["Vol_MA20"] = df["volume"].rolling(window=20).mean()
     df["R_Vol"] = df["volume"] / df["Vol_MA20"].replace(0, np.nan)
 
@@ -161,6 +197,7 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     low_5d = df["low"].rolling(window=5).min()
     df["Range_5d_Pct"] = ((high_5d - low_5d) / low_5d.replace(0, np.nan)) * 100.0
 
+    # RSI(14) chuẩn Wilder
     delta = df["close"].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -169,17 +206,20 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     rs = avg_gain / avg_loss.replace(0, np.nan)
     df["RSI14"] = 100.0 - (100.0 / (1.0 + rs))
 
+    # MACD (12, 26, 9)
     ema12 = df["close"].ewm(span=12, adjust=False).mean()
     ema26 = df["close"].ewm(span=26, adjust=False).mean()
     df["MACD"] = ema12 - ema26
     df["MACD_Signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
     df["MACD_Hist"] = df["MACD"] - df["MACD_Signal"]
 
+    # Bollinger Bands (20, 2)
     std20 = df["close"].rolling(window=20).std()
     df["BB_Upper"] = df["MA20"] + 2.0 * std20
     df["BB_Lower"] = df["MA20"] - 2.0 * std20
     df["BB_Width"] = ((df["BB_Upper"] - df["BB_Lower"]) / df["MA20"].replace(0, np.nan)) * 100.0
 
+    # ATR(14)
     high_low = df["high"] - df["low"]
     high_close = (df["high"] - df["close"].shift(1)).abs()
     low_close = (df["low"] - df["close"].shift(1)).abs()
@@ -190,15 +230,21 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def evaluate_stock(symbol: str, df: pd.DataFrame, vnindex_ret_20d: float) -> dict | None:
-    if df is None or len(df) < 60:
+    if df is None or len(df) < 105:
         return None
 
     df = calculate_indicators(df)
     last = df.iloc[-1]
     prev = df.iloc[-2]
+    prev2 = df.iloc[-3]
 
-    avg_trading_val_bil = (last["close"] * last["Vol_MA20"]) / 1_000_000.0
+    if np.isnan(last["close"]) or np.isnan(last["Vol_MA20"]) or np.isnan(last["MA100"]):
+        return None
 
+    # Giá trị giao dịch trung bình 20 phiên (tỷ VNĐ)
+    avg_trading_val_bil = float((last["close"] * last["Vol_MA20"]) / 1_000_000.0)
+
+    # Tầng 1: Lọc thanh khoản cơ bản (Vol MA20 >= 100k hoặc GTGD >= 2 tỷ VNĐ/phiên)
     if last["close"] < MIN_PRICE_VND:
         return None
     if last["Vol_MA20"] < MIN_VOL_MA20 and avg_trading_val_bil < MIN_TRADING_VAL_BILLION:
@@ -206,50 +252,82 @@ def evaluate_stock(symbol: str, df: pd.DataFrame, vnindex_ret_20d: float) -> dic
 
     rs_diff = float(last["Return_20d"] - vnindex_ret_20d)
     ma50_slope_up = last["MA50"] >= df["MA50"].iloc[-5]
+    ma100_slope_up = last["MA100"] >= df["MA100"].iloc[-10] * 0.998
 
     candle_range = max(float(last["high"] - last["low"]), 0.001)
     close_pos = float((last["close"] - last["low"]) / candle_range)
     daily_change_pct = float(((last["close"] - prev["close"]) / prev["close"]) * 100.0)
+    dist_to_ma100_pct = float(((last["close"] - last["MA100"]) / last["MA100"]) * 100.0)
 
-    # Nhánh A: Mã Tiềm Năng (Tích lũy cạn cung / Siết nền)
+    # ==========================================================================
+    # 1. MẪU HÌNH VIC: BẮT ĐÁY NHỊP CHỈNH VỀ MA100 TRONG UPTREND LỚN
+    # ==========================================================================
+    macro_uptrend = ma100_slope_up and (last["MA50"] >= last["MA100"] * 0.97)
+    near_ma100 = (-4.0 <= dist_to_ma100_pct <= 5.0) or (
+        df["low"].iloc[-3:].min() <= last["MA100"] * 1.025 and last["close"] >= last["MA100"] * 0.965
+    )
+    min_rsi_3d = float(df["RSI14"].iloc[-3:].min())
+    rsi_bottoming = (26.0 <= min_rsi_3d <= 46.0) and (last["RSI14"] >= prev["RSI14"] - 1.5)
+    macd_recovering = (
+        (last["MACD_Hist"] > prev["MACD_Hist"])
+        or (prev["MACD_Hist"] > prev2["MACD_Hist"] and last["MACD_Hist"] >= prev["MACD_Hist"] * 0.92)
+        or (last["MACD"] > last["MACD_Signal"] and prev["MACD"] <= prev["MACD_Signal"])
+    )
+    price_stabilizing = (last["close"] >= last["open"] or close_pos >= 0.38) and (last["R_Vol"] <= 1.45)
+
+    is_vic_ma100_pullback = (
+        macro_uptrend
+        and near_ma100
+        and rsi_bottoming
+        and macd_recovering
+        and price_stabilizing
+    )
+
+    # ==========================================================================
+    # 2. MÃ TIỀM NĂNG: TÍCH LŨY SIẾT NỀN CẠN CUNG TRÊN MA20 / MA50
+    # ==========================================================================
     is_potential_acc = (
         last["close"] > last["MA50"]
         and ma50_slope_up
-        and (0.985 * last["MA20"] <= last["close"] <= 1.045 * last["MA20"])
-        and (last["BB_Width"] <= 14.0 or last["Range_5d_Pct"] <= 5.5)
-        and abs(daily_change_pct) <= 2.2
-        and last["R_Vol"] <= 0.90
-        and 45.0 <= last["RSI14"] <= 65.0
-        and rs_diff >= -1.0
+        and (0.98 * last["MA20"] <= last["close"] <= 1.05 * last["MA20"])
+        and (last["BB_Width"] <= 15.0 or last["Range_5d_Pct"] <= 6.0)
+        and abs(daily_change_pct) <= 2.5
+        and last["R_Vol"] <= 0.95
+        and 44.0 <= last["RSI14"] <= 66.0
+        and rs_diff >= -2.0
     )
 
     is_pocket_pivot = (
         last["close"] > last["MA50"]
-        and prev["BB_Width"] <= 15.0
-        and 1.2 <= daily_change_pct < 2.5
-        and 1.15 <= last["R_Vol"] < 1.5
-        and close_pos >= 0.65
-        and rs_diff >= 0.0
+        and prev["BB_Width"] <= 16.0
+        and 1.0 <= daily_change_pct < 2.5
+        and 1.10 <= last["R_Vol"] < 1.5
+        and close_pos >= 0.60
+        and rs_diff >= -1.0
     )
 
-    # Nhánh B: Mã Mạnh (Breakout dòng tiền)
+    # ==========================================================================
+    # 3. MÃ MẠNH: BÙNG NỔ DÒNG TIỀN (BREAKOUT)
+    # ==========================================================================
     is_strong_breakout = (
         last["close"] > last["MA20"]
         and last["close"] > last["MA50"]
-        and last["R_Vol"] >= 1.45
-        and daily_change_pct >= 2.3
-        and close_pos >= 0.68
-        and 54.0 <= last["RSI14"] <= 76.0
+        and last["R_Vol"] >= 1.40
+        and daily_change_pct >= 2.2
+        and close_pos >= 0.65
+        and 53.0 <= last["RSI14"] <= 77.0
         and last["MACD_Hist"] > 0
-        and rs_diff >= 1.5
+        and rs_diff >= 1.0
     )
 
-    # Nhánh Cảnh báo Bán
+    # ==========================================================================
+    # 4. CẢNH BÁO BÁN / CHỐT LỜI
+    # ==========================================================================
     dist_from_ma20_pct = ((last["close"] - last["MA20"]) / last["MA20"]) * 100.0
     is_sell_signal = (
-        (last["close"] < last["MA20"] and prev["close"] >= prev["MA20"] and last["R_Vol"] >= 1.25)
-        or last["RSI14"] >= 78.0
-        or dist_from_ma20_pct >= 15.0
+        (last["close"] < last["MA20"] and prev["close"] >= prev["MA20"] and last["R_Vol"] >= 1.30)
+        or last["RSI14"] >= 79.0
+        or dist_from_ma20_pct >= 16.0
     )
 
     category = None
@@ -257,6 +335,9 @@ def evaluate_stock(symbol: str, df: pd.DataFrame, vnindex_ret_20d: float) -> dic
     if is_strong_breakout:
         category = "STRONG"
         action_label = "MUA BREAKOUT"
+    elif is_vic_ma100_pullback:
+        category = "MA100_PULLBACK"
+        action_label = "BAT DAY MA100 (MAU HINH VIC)"
     elif is_potential_acc or is_pocket_pivot:
         category = "POTENTIAL"
         action_label = "GOM NEN (POCKET PIVOT)" if is_pocket_pivot else "TICH LUY CAN CUNG"
@@ -266,28 +347,35 @@ def evaluate_stock(symbol: str, df: pd.DataFrame, vnindex_ret_20d: float) -> dic
     else:
         return None
 
-    score_rs = float(np.clip((rs_diff + 4.0) * 3.2, 0.0, 35.0))
-    if category == "STRONG":
-        score_vol = float(np.clip(last["R_Vol"] * 14.5 * close_pos, 0.0, 35.0))
-    elif category == "POTENTIAL":
-        tightness_bonus = max(0.0, (16.0 - float(last["BB_Width"])) * 2.2)
-        score_vol = float(np.clip(tightness_bonus + close_pos * 10.0, 0.0, 35.0))
+    # --- CHẤM ĐIỂM ĐỊNH LƯỢNG ---
+    if category == "MA100_PULLBACK":
+        proximity_pts = float(np.clip(35.0 - abs(dist_to_ma100_pct) * 5.5, 10.0, 35.0))
+        trend_pts = 30.0 if (last["MA50"] > last["MA100"] and ma100_slope_up) else 20.0
+        rebound_pts = (18.0 if last["MACD_Hist"] > prev["MACD_Hist"] else 10.0) + float(np.clip(close_pos * 17.0, 5.0, 17.0))
+        total_score = round(proximity_pts + trend_pts + rebound_pts, 1)
     else:
-        score_vol = float(np.clip(last["R_Vol"] * 12.0, 0.0, 35.0))
+        score_rs = float(np.clip((rs_diff + 4.0) * 3.2, 0.0, 35.0))
+        if category == "STRONG":
+            score_vol = float(np.clip(last["R_Vol"] * 14.5 * close_pos, 0.0, 35.0))
+        elif category == "POTENTIAL":
+            tightness_bonus = max(0.0, (16.0 - float(last["BB_Width"])) * 2.2)
+            score_vol = float(np.clip(tightness_bonus + close_pos * 10.0, 0.0, 35.0))
+        else:
+            score_vol = float(np.clip(last["R_Vol"] * 12.0, 0.0, 35.0))
 
-    trend_pts = 0.0
-    if last["close"] > last["MA20"] > last["MA50"]:
-        trend_pts += 15.0
-    elif last["close"] > last["MA50"]:
-        trend_pts += 10.0
-    if not np.isnan(last["MA200"]) and last["close"] > last["MA200"]:
-        trend_pts += 5.0
-    if 52.0 <= last["RSI14"] <= 70.0 and last["MACD_Hist"] >= prev["MACD_Hist"]:
-        trend_pts += 10.0
-    elif 45.0 <= last["RSI14"] <= 74.0:
-        trend_pts += 6.0
+        trend_pts = 0.0
+        if last["close"] > last["MA20"] > last["MA50"]:
+            trend_pts += 15.0
+        elif last["close"] > last["MA50"]:
+            trend_pts += 10.0
+        if not np.isnan(last["MA200"]) and last["close"] > last["MA200"]:
+            trend_pts += 5.0
+        if 52.0 <= last["RSI14"] <= 70.0 and last["MACD_Hist"] >= prev["MACD_Hist"]:
+            trend_pts += 10.0
+        elif 45.0 <= last["RSI14"] <= 74.0:
+            trend_pts += 6.0
 
-    total_score = round(score_rs + score_vol + trend_pts, 1)
+        total_score = round(score_rs + score_vol + trend_pts, 1)
 
     atr_val = float(last["ATR14"]) if not np.isnan(last["ATR14"]) else float(last["close"] * 0.03)
     stop_loss = round(float(last["close"]) - 2.0 * atr_val, 2)
@@ -300,24 +388,29 @@ def evaluate_stock(symbol: str, df: pd.DataFrame, vnindex_ret_20d: float) -> dic
         "Điểm": total_score,
         "Giá": round(float(last["close"]), 2),
         "% Phiên": round(daily_change_pct, 2),
-        "Vol/MA20": round(float(last["R_Vol"]), 2),
-        "RS vs VNI (%)": round(rs_diff, 1),
+        "GTGD TB (Tỷ)": round(avg_trading_val_bil, 1),
+        "MA100": round(float(last["MA100"]), 2),
+        "Cách MA100 (%)": round(dist_to_ma100_pct, 2),
         "RSI(14)": round(float(last["RSI14"]), 1),
-        "Độ siết BB (%)": round(float(last["BB_Width"]), 1),
+        "MACD Hist": round(float(last["MACD_Hist"]), 2),
+        "Vol/MA20": round(float(last["R_Vol"]), 2),
         "Cắt lỗ (2ATR)": stop_loss,
         "Mục tiêu (3ATR)": target_price,
     }
 
 
 # ==============================================================================
-# 4. HIỂN THỊ KẾT QUẢ TRÊN LOG & GITHUB ACTIONS SUMMARY
+# 5. HIỂN THỊ BẢNG KẾT QUẢ TRÊN GITHUB ACTIONS SUMMARY
 # ==============================================================================
 def write_github_summary(
     vnindex_info: dict,
     strong_list: list[dict],
+    ma100_list: list[dict],
     potential_list: list[dict],
     sell_list: list[dict],
+    total_universe: int,
     total_scanned: int,
+    elapsed_sec: float,
 ):
     now_str = datetime.now(VN_TZ).strftime("%H:%M - %d/%m/%Y")
     vni_close = vnindex_info.get("close", 0.0)
@@ -325,32 +418,41 @@ def write_github_summary(
     vni_ret20 = vnindex_info.get("ret_20d", 0.0)
 
     lines = [
-        f"## 📊 Báo Cáo Quét Cổ Phiếu Định Lượng ({now_str})",
-        f"- **Số mã đã quét:** `{total_scanned}` mã",
+        f"## 📊 Báo Cáo Quét Toàn Thị Trường HOSE + HNX + UPCOM ({now_str})",
+        f"- **Tổng số mã niêm yết đã quét:** `{total_scanned} / {total_universe}` mã (Thời gian chạy: `{elapsed_sec:.1f}s`)",
+        f"- **Điều kiện lọc Thanh khoản:** Khối lượng TB 20 phiên >= `{MIN_VOL_MA20:,}` cp hoặc GTGD >= `{MIN_TRADING_VAL_BILLION}` tỷ VNĐ/phiên",
         f"- **VN-INDEX:** `{vni_close:,.2f}` (`{vni_chg:+.2f}%`) | **Hiệu suất 20 phiên:** `{vni_ret20:+.2f}%`",
         "",
-        "### 🚀 1. Top Mã Mạnh (Bùng nổ dòng tiền - Mua Breakout)",
+        f"### 🎯 1. Nhóm Bắt Đáy MA100 - Mẫu hình VIC (Tìm thấy: {len(ma100_list)} mã)",
     ]
 
+    if ma100_list:
+        df_ma100 = pd.DataFrame(ma100_list).drop(columns=["Nhóm"])
+        lines.append(df_ma100.head(MAX_DISPLAY_ROWS).to_markdown(index=False))
+    else:
+        lines.append("_Chưa có mã chạm MA100 kèm tín hiệu chững đà rơi RSI/MACD._")
+
+    lines.append("")
+    lines.append(f"### 🚀 2. Nhóm Cổ Phiếu Mạnh - Mua Breakout Nổ Vol (Tìm thấy: {len(strong_list)} mã)")
     if strong_list:
         df_strong = pd.DataFrame(strong_list).drop(columns=["Nhóm"])
-        lines.append(df_strong.head(15).to_markdown(index=False))
+        lines.append(df_strong.head(MAX_DISPLAY_ROWS).to_markdown(index=False))
     else:
         lines.append("_Chưa có mã đạt chuẩn nổ Vol & vượt nền trong phiên._")
 
     lines.append("")
-    lines.append("### 💎 2. Top Mã Tiềm Năng (Siết nền cạn cung - Mua Gom)")
+    lines.append(f"### 💎 3. Nhóm Cổ Phiếu Tiềm Năng - Siết Nền Cạn Cung Trên MA20/MA50 (Tìm thấy: {len(potential_list)} mã)")
     if potential_list:
         df_pot = pd.DataFrame(potential_list).drop(columns=["Nhóm"])
-        lines.append(df_pot.head(15).to_markdown(index=False))
+        lines.append(df_pot.head(MAX_DISPLAY_ROWS).to_markdown(index=False))
     else:
         lines.append("_Không có mã đạt tiêu chuẩn siết nền cạn cung._")
 
     lines.append("")
-    lines.append("### ⚠️ 3. Cảnh Báo Chốt Lời / Gãy Nền MA20")
+    lines.append(f"### ⚠️ 4. Cảnh Báo Chốt Lời / Gãy Nền MA20 (Tìm thấy: {len(sell_list)} mã)")
     if sell_list:
         df_sell = pd.DataFrame(sell_list).drop(columns=["Nhóm"])
-        lines.append(df_sell.head(10).to_markdown(index=False))
+        lines.append(df_sell.head(25).to_markdown(index=False))
     else:
         lines.append("_Không có cảnh báo bán đột biến._")
 
@@ -364,10 +466,19 @@ def write_github_summary(
 
 
 # ==============================================================================
-# 5. HÀM CHẠY CHÍNH (MAIN PIPELINE)
+# 6. HÀM CHẠY CHÍNH (QUÉT ĐA LUỒNG 16 WORKERS TOÀN THỊ TRƯỜNG)
 # ==============================================================================
+def process_single_symbol(symbol: str, vnindex_ret_20d: float) -> tuple[bool, dict | None]:
+    df = fetch_historical_data(symbol, days=260)
+    if df.empty:
+        return False, None
+    res = evaluate_stock(symbol, df, vnindex_ret_20d)
+    return True, res
+
+
 def run_scanner():
-    logger.info("Bắt đầu chạy Hệ thống Quét Cổ phiếu Định lượng...")
+    start_time = time.time()
+    logger.info("Bắt đầu chạy Hệ thống Quét Toàn Thị Trường (HOSE + HNX + UPCOM)...")
 
     df_vni = fetch_historical_data("VNINDEX", days=120)
     if not df_vni.empty and len(df_vni) >= 21:
@@ -385,48 +496,60 @@ def run_scanner():
         vnindex_info = {"close": 0.0, "change_pct": 0.0, "ret_20d": 0.0}
 
     symbols = get_stock_universe()
-    logger.info(f"Tổng số mã trong danh sách quét: {len(symbols)} mã")
+    total_universe = len(symbols)
+    logger.info(f"Tổng số mã cổ phiếu 3 sàn cần quét: {total_universe} mã (Chạy {MAX_WORKERS} luồng song song)")
 
     strong_stocks = []
+    ma100_pullback_stocks = []
     potential_stocks = []
     sell_warnings = []
     scanned_count = 0
 
-    for symbol in symbols:
-        df = fetch_historical_data(symbol, days=260)
-        time.sleep(API_DELAY_SECONDS)
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_to_sym = {
+            executor.submit(process_single_symbol, sym, vnindex_ret_20d): sym
+            for sym in symbols
+        }
+        for future in as_completed(future_to_sym):
+            try:
+                has_data, res = future.result()
+                if has_data:
+                    scanned_count += 1
+                if not res:
+                    continue
 
-        if df.empty:
-            continue
+                if res["Nhóm"] == "STRONG":
+                    strong_stocks.append(res)
+                elif res["Nhóm"] == "MA100_PULLBACK":
+                    ma100_pullback_stocks.append(res)
+                elif res["Nhóm"] == "POTENTIAL":
+                    potential_stocks.append(res)
+                elif res["Nhóm"] == "SELL_WARNING":
+                    sell_warnings.append(res)
+            except Exception:
+                pass
 
-        scanned_count += 1
-        res = evaluate_stock(symbol, df, vnindex_ret_20d)
-        if not res:
-            continue
-
-        if res["Nhóm"] == "STRONG":
-            strong_stocks.append(res)
-        elif res["Nhóm"] == "POTENTIAL":
-            potential_stocks.append(res)
-        elif res["Nhóm"] == "SELL_WARNING":
-            sell_warnings.append(res)
-
+    ma100_pullback_stocks.sort(key=lambda x: (x["Điểm"], -abs(x["Cách MA100 (%)"])), reverse=True)
     strong_stocks.sort(key=lambda x: (x["Điểm"], x["Vol/MA20"]), reverse=True)
-    potential_stocks.sort(key=lambda x: (x["Điểm"], -x["Độ siết BB (%)"]), reverse=True)
+    potential_stocks.sort(key=lambda x: x["Điểm"], reverse=True)
     sell_warnings.sort(key=lambda x: x["Vol/MA20"], reverse=True)
 
-    all_results = strong_stocks + potential_stocks + sell_warnings
+    all_results = ma100_pullback_stocks + strong_stocks + potential_stocks + sell_warnings
     if all_results:
         pd.DataFrame(all_results).to_csv("scan_results_latest.csv", index=False, encoding="utf-8-sig")
 
+    elapsed = time.time() - start_time
     write_github_summary(
         vnindex_info=vnindex_info,
         strong_list=strong_stocks,
+        ma100_list=ma100_pullback_stocks,
         potential_list=potential_stocks,
         sell_list=sell_warnings,
+        total_universe=total_universe,
         total_scanned=scanned_count,
+        elapsed_sec=elapsed,
     )
-    logger.info("Hoàn tất quét thị trường!")
+    logger.info(f"Hoàn tất quét {scanned_count}/{total_universe} mã trong {elapsed:.1f} giây!")
 
 
 if __name__ == "__main__":
