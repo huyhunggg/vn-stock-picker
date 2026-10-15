@@ -710,3 +710,85 @@ def run_scanner():
 
 if __name__ == "__main__":
     run_scanner()
+# ==============================================================================
+# HÀM GỬI BÁO CÁO TỰ ĐỘNG VỀ TELEGRAM BOT
+# ==============================================================================
+def send_telegram_alert(
+    vnindex_info: dict,
+    strong_list: list[dict],
+    ma100_list: list[dict],
+    potential_list: list[dict],
+):
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+
+    if not bot_token or not chat_id:
+        logger.info("Chưa cấu hình Telegram Bot Token hoặc Chat ID, bỏ qua bước bắn tin nhắn.")
+        return
+
+    now_str = datetime.now(VN_TZ).strftime("%H:%M - %d/%m/%Y")
+    vni_close = vnindex_info.get("close", 0.0)
+    vni_pts = vnindex_info.get("change_pts", 0.0)
+    vni_chg = vnindex_info.get("change_pct", 0.0)
+    vni_icon = "🟢" if vni_pts >= 0 else "🔴"
+
+    # Tạo nội dung tin nhắn ngắn gọn, sắc nét chuẩn định lượng
+    msg_lines = [
+        f"🚨 **BÁO CÁO TÍN HIỆU ĐỊNH LƯỢNG ({now_str})**",
+        f"📊 **VN-INDEX:** `{vni_close:,.2f}` ({vni_icon} `{vni_pts:+.2f}` | `{vni_chg:+.2f}%`)",
+        "",
+    ]
+
+    # Thêm top mã Breakout (Nhóm mạnh)
+    msg_lines.append(f"🚀 **Top Mã Breakout ({len(strong_list)} mã):**")
+    if strong_list:
+        for item in strong_list[:5]:  # Lấy tối đa top 5 mã điểm cao nhất
+            msg_lines.append(
+                f"• `{item['Mã']}`: Giá `{item['Giá']}` ({item['% Phiên']}) | "
+                f"Vol/MA20: `{item['Vol/MA20']}` | TP: `{item['Mục tiêu (3ATR)']}`"
+            )
+    else:
+        msg_lines.append("_Không có mã đạt chuẩn._")
+
+    # Thêm top mã Bắt đáy MA100 (Mẫu hình VIC)
+    msg_lines.append("")
+    msg_lines.append(f"🎯 **Bắt đáy MA100 - VIC ({len(ma100_list)} mã):**")
+    if ma100_list:
+        for item in ma100_list[:5]:
+            msg_lines.append(
+                f"• `{item['Mã']}`: Giá `{item['Giá']}` | Cách MA100: `{item['Cách MA100 (%)']}%` | "
+                f"RSI: `{item['RSI(14)']}`"
+            )
+    else:
+        msg_lines.append("_Chưa có mã chạm MA100._")
+
+    # Thêm top mã Tích lũy cạn cung
+    msg_lines.append("")
+    msg_lines.append(f"💎 **Top Tích Lũy Cạn Cung ({len(potential_list)} mã):**")
+    if potential_list:
+        for item in potential_list[:5]:
+            msg_lines.append(
+                f"• `{item['Mã']}`: Giá `{item['Giá']}` ({item['% Phiên']}) | "
+                f"BB Width: `{item['Độ siết BB (%)']}%`"
+            )
+    else:
+        msg_lines.append("_Không có mã siết nền._")
+
+    final_message = "\n".join(msg_lines)
+
+    # Gửi qua Telegram API
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": final_message,
+        "parse_mode": "Markdown",
+    }
+
+    try:
+        resp = requests.post(url, json=payload, timeout=10)
+        if resp.status_code == 200:
+            logger.info("Đã gửi cảnh báo tín hiệu thành công về Telegram Bot!")
+        else:
+            logger.warning(f"Lỗi gửi Telegram: {resp.text}")
+    except Exception as e:
+        logger.error(f"Không thể kết nối tới Telegram API: {e}")
