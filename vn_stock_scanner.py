@@ -602,8 +602,14 @@ def run_scanner():
 
     df_vni = fetch_historical_data("VNINDEX", days=120)
     if not df_vni.empty and len(df_vni) >= 21:
-        vni_last = df_vni.iloc[-1]
-        vni_prev = df_vni.iloc[-2]
+        now_hour = datetime.now(VN_TZ).hour
+        if now_hour < 15 and len(df_vni) >= 2:
+            vni_last = df_vni.iloc[-2]
+            vni_prev = df_vni.iloc[-3]
+        else:
+            vni_last = df_vni.iloc[-1]
+            vni_prev = df_vni.iloc[-2]
+
         vni_20d_ago = df_vni.iloc[-21]
         scale_vni = 1000.0 if vni_last["close"] < 5.0 else 1.0
         vni_close = float(vni_last["close"]) * scale_vni
