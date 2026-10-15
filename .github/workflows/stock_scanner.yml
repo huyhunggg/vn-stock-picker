@@ -56,3 +56,9 @@ jobs:
           path: scan_results_latest.csv
           if-no-files-found: ignore
           retention-days: 14
+- name: Chạy bộ quét định lượng toàn thị trường
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python vn_stock_scanner.py
